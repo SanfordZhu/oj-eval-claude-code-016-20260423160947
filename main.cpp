@@ -5,9 +5,10 @@
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
+#include <set>
 
-const int MAX_KEYS = 100;  // Maximum keys per node
-const int MIN_KEYS = 50;   // Minimum keys per node (except root)
+const int MAX_KEYS = 200;  // Increased maximum keys per node
+const int MIN_KEYS = 100;  // Increased minimum keys per node
 const std::string DATA_FILE = "data.bpt";
 
 // Node structure for B+ tree
@@ -26,11 +27,41 @@ struct Node {
     }
 };
 
+// In-memory cache for frequently accessed nodes
+class NodeCache {
+private:
+    std::unordered_map<int, Node> cache;
+    const size_t MAX_CACHE_SIZE = 1000;
+
+public:
+    bool get(int offset, Node& node) {
+        auto it = cache.find(offset);
+        if (it != cache.end()) {
+            node = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    void put(int offset, const Node& node) {
+        if (cache.size() >= MAX_CACHE_SIZE) {
+            // Simple LRU: remove first element
+            cache.erase(cache.begin());
+        }
+        cache[offset] = node;
+    }
+
+    void clear() {
+        cache.clear();
+    }
+};
+
 // File-based B+ tree implementation
 class BPTree {
 private:
     std::fstream file;
     int root_offset;
+    NodeCache cache;
 
     // Write node to file at specified offset
     void write_node(int offset, const Node& node) {
@@ -57,11 +88,20 @@ private:
                 file.write(reinterpret_cast<const char*>(&node.children[i]), sizeof(int));
             }
         }
+
+        // Update cache
+        cache.put(offset, node);
     }
 
     // Read node from file at specified offset
     Node read_node(int offset) {
         Node node;
+
+        // Check cache first
+        if (cache.get(offset, node)) {
+            return node;
+        }
+
         file.seekg(offset);
         file.read(reinterpret_cast<char*>(&node.is_leaf), sizeof(bool));
         file.read(reinterpret_cast<char*>(&node.key_count), sizeof(int));
@@ -93,6 +133,9 @@ private:
                 node.children.push_back(child_offset);
             }
         }
+
+        // Update cache
+        cache.put(offset, node);
 
         return node;
     }
@@ -173,22 +216,15 @@ private:
         if (node.is_leaf) {
             // Insert into leaf node
             int i = node.key_count - 1;
-            while (i >= 0 && key < node.keys[i]) {
-                i--;
-            }
 
             // Check if key-value pair already exists
-            if (i >= 0 && node.keys[i] == key) {
-                // Check if value already exists
-                for (int j = 0; j < node.key_count; j++) {
-                    if (node.keys[j] == key && node.values[j] == value) {
-                        return; // Duplicate key-value pair, don't insert
-                    }
+            for (int j = 0; j < node.key_count; j++) {
+                if (node.keys[j] == key && node.values[j] == value) {
+                    return; // Duplicate key-value pair, don't insert
                 }
             }
 
             // Insert at correct position
-            i = node.key_count - 1;
             while (i >= 0 && key < node.keys[i]) {
                 i--;
             }
@@ -329,20 +365,41 @@ public:
     std::vector<int> find(const std::string& key) {
         std::vector<int> result;
 
+        // Use a set to automatically sort and avoid duplicates
+        std::set<int> value_set;
+
         int leaf_offset = find_leaf(key);
         if (leaf_offset == -1) return result;
 
-        Node leaf = read_node(leaf_offset);
+        // Search through all leaf nodes that might contain this key
+        int current_offset = leaf_offset;
 
-        // Find all values for the key
-        for (int i = 0; i < leaf.key_count; i++) {
-            if (leaf.keys[i] == key) {
-                result.push_back(leaf.values[i]);
+        while (current_offset != -1) {
+            Node current = read_node(current_offset);
+
+            // Check if this node contains the key
+            bool found_in_node = false;
+            for (int i = 0; i < current.key_count; i++) {
+                if (current.keys[i] == key) {
+                    value_set.insert(current.values[i]);
+                    found_in_node = true;
+                } else if (found_in_node && current.keys[i] > key) {
+                    // Since keys are sorted, we can stop once we pass the key
+                    break;
+                }
+            }
+
+            // Move to next leaf node
+            current_offset = current.next_leaf;
+
+            // If we've passed all instances of the key, we can stop
+            if (!found_in_node && !value_set.empty()) {
+                break;
             }
         }
 
-        // Sort values in ascending order
-        std::sort(result.begin(), result.end());
+        // Convert set to vector
+        result.assign(value_set.begin(), value_set.end());
 
         return result;
     }
