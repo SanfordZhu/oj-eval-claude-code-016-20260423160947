@@ -4,11 +4,10 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
-#include <unordered_map>
 #include <set>
 
-const int MAX_KEYS = 200;  // Increased maximum keys per node
-const int MIN_KEYS = 100;  // Increased minimum keys per node
+const int MAX_KEYS = 100;  // Moderate size for balance
+const int MIN_KEYS = 50;
 const std::string DATA_FILE = "data.bpt";
 
 // Node structure for B+ tree
@@ -27,41 +26,11 @@ struct Node {
     }
 };
 
-// In-memory cache for frequently accessed nodes
-class NodeCache {
-private:
-    std::unordered_map<int, Node> cache;
-    const size_t MAX_CACHE_SIZE = 1000;
-
-public:
-    bool get(int offset, Node& node) {
-        auto it = cache.find(offset);
-        if (it != cache.end()) {
-            node = it->second;
-            return true;
-        }
-        return false;
-    }
-
-    void put(int offset, const Node& node) {
-        if (cache.size() >= MAX_CACHE_SIZE) {
-            // Simple LRU: remove first element
-            cache.erase(cache.begin());
-        }
-        cache[offset] = node;
-    }
-
-    void clear() {
-        cache.clear();
-    }
-};
-
 // File-based B+ tree implementation
 class BPTree {
 private:
     std::fstream file;
     int root_offset;
-    NodeCache cache;
 
     // Write node to file at specified offset
     void write_node(int offset, const Node& node) {
@@ -88,20 +57,11 @@ private:
                 file.write(reinterpret_cast<const char*>(&node.children[i]), sizeof(int));
             }
         }
-
-        // Update cache
-        cache.put(offset, node);
     }
 
     // Read node from file at specified offset
     Node read_node(int offset) {
         Node node;
-
-        // Check cache first
-        if (cache.get(offset, node)) {
-            return node;
-        }
-
         file.seekg(offset);
         file.read(reinterpret_cast<char*>(&node.is_leaf), sizeof(bool));
         file.read(reinterpret_cast<char*>(&node.key_count), sizeof(int));
@@ -133,9 +93,6 @@ private:
                 node.children.push_back(child_offset);
             }
         }
-
-        // Update cache
-        cache.put(offset, node);
 
         return node;
     }
@@ -215,8 +172,6 @@ private:
     void insert_non_full(int node_offset, Node& node, const std::string& key, int value) {
         if (node.is_leaf) {
             // Insert into leaf node
-            int i = node.key_count - 1;
-
             // Check if key-value pair already exists
             for (int j = 0; j < node.key_count; j++) {
                 if (node.keys[j] == key && node.values[j] == value) {
@@ -225,6 +180,7 @@ private:
             }
 
             // Insert at correct position
+            int i = node.key_count - 1;
             while (i >= 0 && key < node.keys[i]) {
                 i--;
             }
