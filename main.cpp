@@ -6,23 +6,23 @@
 #include <cstring>
 #include <set>
 
-const int MAX_KEYS = 100;  // Moderate size for balance
-const int MIN_KEYS = 50;
+const int MAX_KEYS = 50;  // Smaller size for better performance
+const int MIN_KEYS = 25;
 const std::string DATA_FILE = "data.bpt";
 
 // Node structure for B+ tree
 struct Node {
     bool is_leaf;
     int key_count;
-    std::vector<std::string> keys;
-    std::vector<int> values;  // Only used for leaf nodes
-    std::vector<int> children; // Only used for internal nodes (file offsets)
+    std::string keys[MAX_KEYS];
+    int values[MAX_KEYS];  // Only used for leaf nodes
+    int children[MAX_KEYS + 1]; // Only used for internal nodes (file offsets)
     int next_leaf; // Only used for leaf nodes (file offset of next leaf)
 
     Node() : is_leaf(true), key_count(0), next_leaf(-1) {
-        keys.reserve(MAX_KEYS + 1);
-        values.reserve(MAX_KEYS + 1);
-        children.reserve(MAX_KEYS + 2);
+        for (int i = 0; i <= MAX_KEYS; i++) {
+            children[i] = -1;
+        }
     }
 };
 
@@ -73,24 +73,20 @@ private:
             char* buffer = new char[key_len + 1];
             file.read(buffer, key_len);
             buffer[key_len] = '\0';
-            node.keys.push_back(std::string(buffer));
+            node.keys[i] = std::string(buffer);
             delete[] buffer;
         }
 
         if (node.is_leaf) {
             // Read values for leaf nodes
             for (int i = 0; i < node.key_count; i++) {
-                int value;
-                file.read(reinterpret_cast<char*>(&value), sizeof(int));
-                node.values.push_back(value);
+                file.read(reinterpret_cast<char*>(&node.values[i]), sizeof(int));
             }
             file.read(reinterpret_cast<char*>(&node.next_leaf), sizeof(int));
         } else {
             // Read children offsets for internal nodes
             for (int i = 0; i <= node.key_count; i++) {
-                int child_offset;
-                file.read(reinterpret_cast<char*>(&child_offset), sizeof(int));
-                node.children.push_back(child_offset);
+                file.read(reinterpret_cast<char*>(&node.children[i]), sizeof(int));
             }
         }
 
@@ -127,8 +123,8 @@ private:
 
             // Move half of the keys and values to new node
             for (int i = split_point; i < node.key_count; i++) {
-                new_node.keys.push_back(node.keys[i]);
-                new_node.values.push_back(node.values[i]);
+                new_node.keys[i - split_point] = node.keys[i];
+                new_node.values[i - split_point] = node.values[i];
             }
             new_node.key_count = node.key_count - split_point;
             new_node.is_leaf = true;
@@ -149,10 +145,10 @@ private:
 
             // Move half of the keys and children to new node
             for (int i = split_point + 1; i < node.key_count; i++) {
-                new_node.keys.push_back(node.keys[i]);
+                new_node.keys[i - split_point - 1] = node.keys[i];
             }
             for (int i = split_point + 1; i <= node.key_count; i++) {
-                new_node.children.push_back(node.children[i]);
+                new_node.children[i - split_point - 1] = node.children[i];
             }
             new_node.key_count = node.key_count - split_point - 1;
             new_node.is_leaf = false;
@@ -182,12 +178,14 @@ private:
             // Insert at correct position
             int i = node.key_count - 1;
             while (i >= 0 && key < node.keys[i]) {
+                node.keys[i + 1] = node.keys[i];
+                node.values[i + 1] = node.values[i];
                 i--;
             }
             i++;
 
-            node.keys.insert(node.keys.begin() + i, key);
-            node.values.insert(node.values.begin() + i, value);
+            node.keys[i] = key;
+            node.values[i] = value;
             node.key_count++;
 
             write_node(node_offset, node);
@@ -207,8 +205,16 @@ private:
                 Node new_child = read_node(new_child_offset);
 
                 // Update current node
-                node.keys.insert(node.keys.begin() + i, new_child.keys[0]);
-                node.children.insert(node.children.begin() + i + 1, new_child_offset);
+                // Shift keys and children to make room
+                for (int j = node.key_count; j > i; j--) {
+                    node.keys[j] = node.keys[j - 1];
+                }
+                for (int j = node.key_count + 1; j > i + 1; j--) {
+                    node.children[j] = node.children[j - 1];
+                }
+
+                node.keys[i] = new_child.keys[0];
+                node.children[i + 1] = new_child_offset;
                 node.key_count++;
 
                 write_node(node_offset, node);
@@ -258,8 +264,8 @@ public:
             Node root;
             root.is_leaf = true;
             root.key_count = 1;
-            root.keys.push_back(key);
-            root.values.push_back(value);
+            root.keys[0] = key;
+            root.values[0] = value;
 
             root_offset = sizeof(int); // After header
             write_node(root_offset, root);
@@ -272,7 +278,7 @@ public:
             Node new_root;
             new_root.is_leaf = false;
             new_root.key_count = 0;
-            new_root.children.push_back(root_offset);
+            new_root.children[0] = root_offset;
 
             int new_root_offset = file.tellp();
 
@@ -281,8 +287,8 @@ public:
             Node new_child = read_node(new_child_offset);
 
             // Update new root
-            new_root.keys.push_back(new_child.keys[0]);
-            new_root.children.push_back(new_child_offset);
+            new_root.keys[0] = new_child.keys[0];
+            new_root.children[1] = new_child_offset;
             new_root.key_count = 1;
 
             root_offset = new_root_offset;
@@ -309,8 +315,11 @@ public:
         // Find and remove the key-value pair
         for (int i = 0; i < leaf.key_count; i++) {
             if (leaf.keys[i] == key && leaf.values[i] == value) {
-                leaf.keys.erase(leaf.keys.begin() + i);
-                leaf.values.erase(leaf.values.begin() + i);
+                // Shift remaining elements
+                for (int j = i; j < leaf.key_count - 1; j++) {
+                    leaf.keys[j] = leaf.keys[j + 1];
+                    leaf.values[j] = leaf.values[j + 1];
+                }
                 leaf.key_count--;
                 write_node(leaf_offset, leaf);
                 break;
@@ -320,9 +329,6 @@ public:
 
     std::vector<int> find(const std::string& key) {
         std::vector<int> result;
-
-        // Use a set to automatically sort and avoid duplicates
-        std::set<int> value_set;
 
         int leaf_offset = find_leaf(key);
         if (leaf_offset == -1) return result;
@@ -337,7 +343,7 @@ public:
             bool found_in_node = false;
             for (int i = 0; i < current.key_count; i++) {
                 if (current.keys[i] == key) {
-                    value_set.insert(current.values[i]);
+                    result.push_back(current.values[i]);
                     found_in_node = true;
                 } else if (found_in_node && current.keys[i] > key) {
                     // Since keys are sorted, we can stop once we pass the key
@@ -349,13 +355,13 @@ public:
             current_offset = current.next_leaf;
 
             // If we've passed all instances of the key, we can stop
-            if (!found_in_node && !value_set.empty()) {
+            if (!found_in_node && !result.empty()) {
                 break;
             }
         }
 
-        // Convert set to vector
-        result.assign(value_set.begin(), value_set.end());
+        // Sort values in ascending order
+        std::sort(result.begin(), result.end());
 
         return result;
     }
