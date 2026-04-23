@@ -6,8 +6,8 @@
 #include <cstring>
 #include <set>
 
-const int MAX_KEYS = 50;  // Smaller size for better performance
-const int MIN_KEYS = 25;
+const int MAX_KEYS = 32;  // Even smaller size
+const int MIN_KEYS = 16;
 const std::string DATA_FILE = "data.bpt";
 
 // Node structure for B+ tree
@@ -34,6 +34,8 @@ private:
 
     // Write node to file at specified offset
     void write_node(int offset, const Node& node) {
+        if (offset < 0) return;
+
         file.seekp(offset);
         file.write(reinterpret_cast<const char*>(&node.is_leaf), sizeof(bool));
         file.write(reinterpret_cast<const char*>(&node.key_count), sizeof(int));
@@ -62,14 +64,26 @@ private:
     // Read node from file at specified offset
     Node read_node(int offset) {
         Node node;
+        if (offset < 0) return node;
+
         file.seekg(offset);
         file.read(reinterpret_cast<char*>(&node.is_leaf), sizeof(bool));
         file.read(reinterpret_cast<char*>(&node.key_count), sizeof(int));
+
+        // Validate key count
+        if (node.key_count < 0 || node.key_count > MAX_KEYS) {
+            node.key_count = 0;
+            return node;
+        }
 
         // Read keys
         for (int i = 0; i < node.key_count; i++) {
             int key_len;
             file.read(reinterpret_cast<char*>(&key_len), sizeof(int));
+            if (key_len < 0 || key_len > 64) {
+                node.key_count = i;
+                return node;
+            }
             char* buffer = new char[key_len + 1];
             file.read(buffer, key_len);
             buffer[key_len] = '\0';
@@ -105,8 +119,13 @@ private:
             while (i < current.key_count && key >= current.keys[i]) {
                 i++;
             }
-            current_offset = current.children[i];
-            current = read_node(current_offset);
+            if (i >= 0 && i <= current.key_count) {
+                current_offset = current.children[i];
+                if (current_offset < 0) return -1;
+                current = read_node(current_offset);
+            } else {
+                return -1;
+            }
         }
 
         return current_offset;
@@ -115,6 +134,8 @@ private:
     // Split a full node
     int split_node(int node_offset, Node& node) {
         int new_offset = file.tellp();
+        if (new_offset < 0) new_offset = sizeof(int) + 1024; // Start after header
+
         Node new_node;
 
         if (node.is_leaf) {
@@ -184,11 +205,12 @@ private:
             }
             i++;
 
-            node.keys[i] = key;
-            node.values[i] = value;
-            node.key_count++;
-
-            write_node(node_offset, node);
+            if (i < MAX_KEYS) {
+                node.keys[i] = key;
+                node.values[i] = value;
+                node.key_count++;
+                write_node(node_offset, node);
+            }
         } else {
             // Find appropriate child
             int i = 0;
@@ -197,11 +219,15 @@ private:
             }
 
             int child_offset = node.children[i];
+            if (child_offset < 0) return;
+
             Node child = read_node(child_offset);
 
             if (child.key_count == MAX_KEYS) {
                 // Child is full, split it
                 int new_child_offset = split_node(child_offset, child);
+                if (new_child_offset < 0) return;
+
                 Node new_child = read_node(new_child_offset);
 
                 // Update current node
@@ -243,9 +269,11 @@ public:
             // Write initial header
             int header = -1; // No root
             file.write(reinterpret_cast<const char*>(&header), sizeof(int));
+            file.flush();
         } else {
             // Read root offset
             file.read(reinterpret_cast<char*>(&root_offset), sizeof(int));
+            if (root_offset < 0) root_offset = -1;
         }
     }
 
@@ -254,6 +282,7 @@ public:
             // Write root offset before closing
             file.seekp(0);
             file.write(reinterpret_cast<const char*>(&root_offset), sizeof(int));
+            file.flush();
             file.close();
         }
     }
@@ -281,9 +310,12 @@ public:
             new_root.children[0] = root_offset;
 
             int new_root_offset = file.tellp();
+            if (new_root_offset < 0) new_root_offset = sizeof(int) + 1024;
 
             // Split old root
             int new_child_offset = split_node(root_offset, root);
+            if (new_child_offset < 0) return;
+
             Node new_child = read_node(new_child_offset);
 
             // Update new root
