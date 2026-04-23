@@ -6,33 +6,40 @@
 #include <cstring>
 #include <set>
 
-const int MAX_KEYS = 32;  // Even smaller size
-const int MIN_KEYS = 16;
+const int MAX_KEYS = 16;  // Small size for better performance
+const int MIN_KEYS = 8;
 const std::string DATA_FILE = "data.bpt";
 
-// Node structure for B+ tree
-struct Node {
-    bool is_leaf;
-    int key_count;
-    std::string keys[MAX_KEYS];
-    int values[MAX_KEYS];  // Only used for leaf nodes
-    int children[MAX_KEYS + 1]; // Only used for internal nodes (file offsets)
-    int next_leaf; // Only used for leaf nodes (file offset of next leaf)
-
-    Node() : is_leaf(true), key_count(0), next_leaf(-1) {
-        for (int i = 0; i <= MAX_KEYS; i++) {
-            children[i] = -1;
-        }
-    }
-};
-
-// File-based B+ tree implementation
+// B+ Tree implementation with file storage
 class BPTree {
 private:
     std::fstream file;
     int root_offset;
+    int free_list_head;
 
-    // Write node to file at specified offset
+    struct Node {
+        bool is_leaf;
+        int key_count;
+        std::string keys[MAX_KEYS];
+        int values[MAX_KEYS];  // Only for leaf nodes
+        int children[MAX_KEYS + 1]; // File offsets for internal nodes
+        int next_leaf; // For leaf nodes only
+
+        Node() : is_leaf(true), key_count(0), next_leaf(-1) {
+            for (int i = 0; i <= MAX_KEYS; i++) {
+                children[i] = -1;
+            }
+        }
+    };
+
+    // Allocate a new node
+    int allocate_node() {
+        int offset = file.tellp();
+        if (offset < sizeof(int) * 2) offset = sizeof(int) * 2;
+        return offset;
+    }
+
+    // Write node to file
     void write_node(int offset, const Node& node) {
         if (offset < 0) return;
 
@@ -61,7 +68,7 @@ private:
         }
     }
 
-    // Read node from file at specified offset
+    // Read node from file
     Node read_node(int offset) {
         Node node;
         if (offset < 0) return node;
@@ -70,7 +77,6 @@ private:
         file.read(reinterpret_cast<char*>(&node.is_leaf), sizeof(bool));
         file.read(reinterpret_cast<char*>(&node.key_count), sizeof(int));
 
-        // Validate key count
         if (node.key_count < 0 || node.key_count > MAX_KEYS) {
             node.key_count = 0;
             return node;
@@ -107,7 +113,7 @@ private:
         return node;
     }
 
-    // Find the appropriate leaf node for the given key
+    // Find leaf node containing the key
     int find_leaf(const std::string& key) {
         if (root_offset == -1) return -1;
 
@@ -119,13 +125,9 @@ private:
             while (i < current.key_count && key >= current.keys[i]) {
                 i++;
             }
-            if (i >= 0 && i <= current.key_count) {
-                current_offset = current.children[i];
-                if (current_offset < 0) return -1;
-                current = read_node(current_offset);
-            } else {
-                return -1;
-            }
+            current_offset = current.children[i];
+            if (current_offset < 0) return -1;
+            current = read_node(current_offset);
         }
 
         return current_offset;
@@ -133,16 +135,14 @@ private:
 
     // Split a full node
     int split_node(int node_offset, Node& node) {
-        int new_offset = file.tellp();
-        if (new_offset < 0) new_offset = sizeof(int) + 1024; // Start after header
-
+        int new_offset = allocate_node();
         Node new_node;
 
         if (node.is_leaf) {
             // Split leaf node
             int split_point = (node.key_count + 1) / 2;
 
-            // Move half of the keys and values to new node
+            // Move half to new node
             for (int i = split_point; i < node.key_count; i++) {
                 new_node.keys[i - split_point] = node.keys[i];
                 new_node.values[i - split_point] = node.values[i];
@@ -155,7 +155,6 @@ private:
             node.key_count = split_point;
             node.next_leaf = new_offset;
 
-            // Write both nodes
             write_node(node_offset, node);
             write_node(new_offset, new_node);
 
@@ -164,7 +163,7 @@ private:
             // Split internal node
             int split_point = node.key_count / 2;
 
-            // Move half of the keys and children to new node
+            // Move half to new node
             for (int i = split_point + 1; i < node.key_count; i++) {
                 new_node.keys[i - split_point - 1] = node.keys[i];
             }
@@ -177,7 +176,6 @@ private:
             // Update original node
             node.key_count = split_point;
 
-            // Write both nodes
             write_node(node_offset, node);
             write_node(new_offset, new_node);
 
@@ -188,15 +186,14 @@ private:
     // Insert into non-full node
     void insert_non_full(int node_offset, Node& node, const std::string& key, int value) {
         if (node.is_leaf) {
-            // Insert into leaf node
-            // Check if key-value pair already exists
+            // Check for duplicate
             for (int j = 0; j < node.key_count; j++) {
                 if (node.keys[j] == key && node.values[j] == value) {
-                    return; // Duplicate key-value pair, don't insert
+                    return;
                 }
             }
 
-            // Insert at correct position
+            // Find insertion position
             int i = node.key_count - 1;
             while (i >= 0 && key < node.keys[i]) {
                 node.keys[i + 1] = node.keys[i];
@@ -212,7 +209,7 @@ private:
                 write_node(node_offset, node);
             }
         } else {
-            // Find appropriate child
+            // Find child
             int i = 0;
             while (i < node.key_count && key >= node.keys[i]) {
                 i++;
@@ -224,14 +221,13 @@ private:
             Node child = read_node(child_offset);
 
             if (child.key_count == MAX_KEYS) {
-                // Child is full, split it
+                // Split child
                 int new_child_offset = split_node(child_offset, child);
                 if (new_child_offset < 0) return;
 
                 Node new_child = read_node(new_child_offset);
 
-                // Update current node
-                // Shift keys and children to make room
+                // Make room in parent
                 for (int j = node.key_count; j > i; j--) {
                     node.keys[j] = node.keys[j - 1];
                 }
@@ -245,7 +241,6 @@ private:
 
                 write_node(node_offset, node);
 
-                // Determine which child to insert into
                 if (key >= node.keys[i]) {
                     child_offset = new_child_offset;
                     child = new_child;
@@ -260,18 +255,15 @@ public:
     BPTree() : root_offset(-1) {
         file.open(DATA_FILE, std::ios::in | std::ios::out | std::ios::binary);
         if (!file.is_open()) {
-            // File doesn't exist, create it
             file.clear();
             file.open(DATA_FILE, std::ios::out | std::ios::binary);
             file.close();
             file.open(DATA_FILE, std::ios::in | std::ios::out | std::ios::binary);
 
-            // Write initial header
-            int header = -1; // No root
+            int header = -1;
             file.write(reinterpret_cast<const char*>(&header), sizeof(int));
             file.flush();
         } else {
-            // Read root offset
             file.read(reinterpret_cast<char*>(&root_offset), sizeof(int));
             if (root_offset < 0) root_offset = -1;
         }
@@ -279,7 +271,6 @@ public:
 
     ~BPTree() {
         if (file.is_open()) {
-            // Write root offset before closing
             file.seekp(0);
             file.write(reinterpret_cast<const char*>(&root_offset), sizeof(int));
             file.flush();
@@ -289,36 +280,31 @@ public:
 
     void insert(const std::string& key, int value) {
         if (root_offset == -1) {
-            // Tree is empty, create root
             Node root;
             root.is_leaf = true;
             root.key_count = 1;
             root.keys[0] = key;
             root.values[0] = value;
 
-            root_offset = sizeof(int); // After header
+            root_offset = sizeof(int);
             write_node(root_offset, root);
             return;
         }
 
         Node root = read_node(root_offset);
         if (root.key_count == MAX_KEYS) {
-            // Root is full, split it
             Node new_root;
             new_root.is_leaf = false;
             new_root.key_count = 0;
             new_root.children[0] = root_offset;
 
-            int new_root_offset = file.tellp();
-            if (new_root_offset < 0) new_root_offset = sizeof(int) + 1024;
+            int new_root_offset = allocate_node();
 
-            // Split old root
             int new_child_offset = split_node(root_offset, root);
             if (new_child_offset < 0) return;
 
             Node new_child = read_node(new_child_offset);
 
-            // Update new root
             new_root.keys[0] = new_child.keys[0];
             new_root.children[1] = new_child_offset;
             new_root.key_count = 1;
@@ -326,7 +312,6 @@ public:
             root_offset = new_root_offset;
             write_node(root_offset, new_root);
 
-            // Insert into appropriate child
             if (key < new_root.keys[0]) {
                 insert_non_full(root_offset, new_root, key, value);
             } else {
@@ -338,16 +323,13 @@ public:
     }
 
     void remove(const std::string& key, int value) {
-        // Find the leaf node containing the key-value pair
         int leaf_offset = find_leaf(key);
         if (leaf_offset == -1) return;
 
         Node leaf = read_node(leaf_offset);
 
-        // Find and remove the key-value pair
         for (int i = 0; i < leaf.key_count; i++) {
             if (leaf.keys[i] == key && leaf.values[i] == value) {
-                // Shift remaining elements
                 for (int j = i; j < leaf.key_count - 1; j++) {
                     leaf.keys[j] = leaf.keys[j + 1];
                     leaf.values[j] = leaf.values[j + 1];
@@ -365,36 +347,25 @@ public:
         int leaf_offset = find_leaf(key);
         if (leaf_offset == -1) return result;
 
-        // Search through all leaf nodes that might contain this key
         int current_offset = leaf_offset;
-
         while (current_offset != -1) {
             Node current = read_node(current_offset);
 
-            // Check if this node contains the key
             bool found_in_node = false;
             for (int i = 0; i < current.key_count; i++) {
                 if (current.keys[i] == key) {
                     result.push_back(current.values[i]);
                     found_in_node = true;
                 } else if (found_in_node && current.keys[i] > key) {
-                    // Since keys are sorted, we can stop once we pass the key
                     break;
                 }
             }
 
-            // Move to next leaf node
             current_offset = current.next_leaf;
-
-            // If we've passed all instances of the key, we can stop
-            if (!found_in_node && !result.empty()) {
-                break;
-            }
+            if (!found_in_node && !result.empty()) break;
         }
 
-        // Sort values in ascending order
         std::sort(result.begin(), result.end());
-
         return result;
     }
 };
